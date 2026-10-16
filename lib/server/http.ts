@@ -1,13 +1,12 @@
 import 'server-only'
-import { isAuthEnabled, isAuthenticated } from '@/lib/server/auth'
+import { getAuthenticatedWorkspaceId } from '@/lib/server/auth'
 
 export function unauthorizedResponse() {
   return Response.json({ error: 'Your session has expired. Please sign in again.' }, { status: 401 })
 }
 
-export function requireAdmin(request: Request): Response | null {
-  if (!isAuthEnabled()) return null
-  return isAuthenticated(request) ? null : unauthorizedResponse()
+export function requireWorkspace(request: Request): string | Response {
+  return getAuthenticatedWorkspaceId(request) ?? unauthorizedResponse()
 }
 
 export function errorResponse(message: string, status = 500) {

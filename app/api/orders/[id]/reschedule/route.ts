@@ -1,4 +1,4 @@
-import { errorResponse, isUuid, requireAdmin } from '@/lib/server/http'
+import { errorResponse, isUuid, requireWorkspace } from '@/lib/server/http'
 import { rescheduleOrder } from '@/lib/server/orders'
 import { dispatchReminderIfDue } from '@/lib/server/reminders'
 
@@ -13,8 +13,8 @@ function isIsoDate(value: unknown): value is string {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  const unauthorized = requireAdmin(request)
-  if (unauthorized) return unauthorized
+  const workspaceId = requireWorkspace(request)
+  if (typeof workspaceId !== 'string') return workspaceId
   const { id } = await context.params
   if (!isUuid(id)) return errorResponse('Order was not found.', 404)
 
@@ -31,9 +31,9 @@ export async function PATCH(request: Request, context: RouteContext) {
   if (!isIsoDate(deliveryDeadline)) return errorResponse('Choose a valid delivery deadline.', 400)
 
   try {
-    const order = await rescheduleOrder(id, deliveryDeadline)
+    const order = await rescheduleOrder(id, workspaceId, deliveryDeadline)
     if (!order) return errorResponse('Order was not found.', 404)
-    const warning = await dispatchReminderIfDue(order)
+    const warning = await dispatchReminderIfDue(order, workspaceId)
     return Response.json({ order, warning })
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('Delivery deadline cannot')) {

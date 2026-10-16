@@ -1,10 +1,12 @@
 import { Analytics } from '@vercel/analytics/next'
+import { cookies } from 'next/headers'
 import type { Metadata, Viewport } from 'next'
+import { LanguageProvider, type Language } from '@/lib/language'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Suvarna | Goldsmith Studio',
-  description: 'A simple digital diary and jewellery catalogue for Suvarna Goldsmith Studio.',
+  title: 'Kanthimathi | Goldsmith Studio',
+  description: 'A simple digital diary and jewellery catalogue for Kanthimathi Goldsmith Studio.',
   generator: 'v0.app',
   icons: {
     icon: [
@@ -33,16 +35,21 @@ export const viewport: Viewport = {
   ],
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode
 }>) {
+  const cookieStore = await cookies()
+  const language: Language = cookieStore.get('suvarna_language')?.value === 'ta' ? 'ta' : 'en'
+
   return (
-    <html lang="en">
+    <html lang={language}>
       <body className="antialiased">
-        {children}
-        {process.env.NODE_ENV === 'production' && <Analytics />}
+        <LanguageProvider initialLanguage={language}>
+          {children}
+          {process.env.NODE_ENV === 'production' && <Analytics />}
+        </LanguageProvider>
       </body>
     </html>
   )

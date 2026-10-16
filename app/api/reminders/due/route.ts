@@ -1,15 +1,15 @@
-import { errorResponse, isUuid, requireAdmin } from '@/lib/server/http'
+import { errorResponse, isUuid, requireWorkspace } from '@/lib/server/http'
 import { getDueReminders, markPopupShown } from '@/lib/server/orders'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 export async function GET(request: Request) {
-  const unauthorized = requireAdmin(request)
-  if (unauthorized) return unauthorized
+  const workspaceId = requireWorkspace(request)
+  if (typeof workspaceId !== 'string') return workspaceId
 
   try {
-    const reminders = await getDueReminders()
+    const reminders = await getDueReminders(workspaceId)
     return Response.json({ reminders }, { headers: { 'Cache-Control': 'no-store' } })
   } catch (error) {
     console.error('Could not load due reminders:', error)
@@ -18,8 +18,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const unauthorized = requireAdmin(request)
-  if (unauthorized) return unauthorized
+  const workspaceId = requireWorkspace(request)
+  if (typeof workspaceId !== 'string') return workspaceId
 
   let body: unknown
   try {
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    await markPopupShown(reminderId)
+    await markPopupShown(reminderId, workspaceId)
     return Response.json({ recorded: true })
   } catch (error) {
     console.error('Could not record reminder popup:', error)

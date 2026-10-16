@@ -5,7 +5,7 @@ import type { OrderInput } from '@/lib/order-validation'
 import type { OrderRecord } from '@/lib/order-types'
 export type OrderFilter = 'all' | 'pending' | 'completed' | 'overdue'
 
-const ORDER_SELECT = `
+const orderSelect = (includeSampleImage: boolean) => `
   SELECT
     o.id,
     o.customer_name AS "customerName",
@@ -14,6 +14,7 @@ const ORDER_SELECT = `
     o.order_date::text AS "orderDate",
     o.delivery_deadline::text AS "deliveryDeadline",
     o.additional_notes AS "additionalNotes",
+    ${includeSampleImage ? 'o.sample_image' : 'NULL::text'} AS "sampleImage",
     CASE
       WHEN o.status = 'completed' THEN 'completed'
       WHEN o.delivery_deadline < (NOW() AT TIME ZONE 'Asia/Kolkata')::date THEN 'overdue'
@@ -39,10 +40,10 @@ function mapOrder(row: Record<string, unknown>): OrderRecord {
   }
 }
 
-export async function getOrders(filter: OrderFilter = 'all', search = ''): Promise<OrderRecord[]> {
+export async function getOrders(workspaceId: string, filter: OrderFilter = 'all', search = ''): Promise<OrderRecord[]> {
   const pool = getDatabase()
-  const clauses: string[] = []
-  const values: unknown[] = []
+  const clauses: string[] = ['o.workspace_id = $1']
+  const values: unknown[] = [workspaceId]
   if (filter !== 'all') {
     if (filter === 'overdue') {
       clauses.push(
@@ -63,7 +64,7 @@ export async function getOrders(filter: OrderFilter = 'all', search = ''): Promi
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
   const result = await pool.query(
-    `${ORDER_SELECT} ${where} ORDER BY
+    `${orderSelect(false)} ${where} ORDER BY
       CASE WHEN o.status = 'pending' AND o.delivery_deadline < (NOW() AT TIME ZONE 'Asia/Kolkata')::date THEN 0 ELSE 1 END,
       o.delivery_deadline ASC,
       o.created_at DESC`,
@@ -72,9 +73,9 @@ export async function getOrders(filter: OrderFilter = 'all', search = ''): Promi
   return result.rows.map(mapOrder)
 }
 
-export async function getOrder(id: string, client?: PoolClient): Promise<OrderRecord | null> {
+export async function getOrder(id: string, workspaceId: string, client?: PoolClient): Promise<OrderRecord | null> {
   const executor = client ?? getDatabase()
-  const result = await executor.query(`${ORDER_SELECT} WHERE o.id = $1`, [id])
+  const result = await executor.query(`${orderSelect(true)} WHERE o.id = $1 AND o.workspace_id = $2`, [id, workspaceId])
   return result.rows[0] ? mapOrder(result.rows[0]) : null
 }
 
@@ -115,28 +116,30 @@ async function scheduleReminder(client: PoolClient, orderId: string, eventType: 
   })
 }
 
-export async function createOrder(input: OrderInput): Promise<OrderRecord> {
+export async function createOrder(workspaceId: string, input: OrderInput): Promise<OrderRecord> {
   const pool = getDatabase()
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const inserted = await client.query(
       `INSERT INTO orders
-        (customer_name, jewellery_name, advance_amount, order_date, delivery_deadline, additional_notes)
-       VALUES ($1, $2, $3, $4::date, $5::date, $6)
+        (workspace_id, customer_name, jewellery_name, advance_amount, order_date, delivery_deadline, additional_notes, sample_image)
+       VALUES ($1, $2, $3, $4, $5::date, $6::date, $7, $8)
        RETURNING id`,
       [
+        workspaceId,
         input.customerName,
         input.jewelleryName,
         input.advanceAmount.toFixed(2),
         input.orderDate,
         input.deliveryDeadline,
         input.additionalNotes,
+        input.sampleImage ?? null,
       ],
     )
     const id = inserted.rows[0].id as string
     await scheduleReminder(client, id, 'scheduled')
-    const order = await getOrder(id, client)
+    const order = await getOrder(id, workspaceId, client)
     if (!order) throw new Error('Order was created but could not be read back.')
     await client.query('COMMIT')
     return order
@@ -148,15 +151,15 @@ export async function createOrder(input: OrderInput): Promise<OrderRecord> {
   }
 }
 
-export async function updateOrder(id: string, input: OrderInput): Promise<OrderRecord | null> {
+export async function updateOrder(id: string, workspaceId: string, input: OrderInput): Promise<OrderRecord | null> {
   const pool = getDatabase()
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const previous = await client.query(
       `SELECT status, delivery_deadline::text AS delivery_deadline
-       FROM orders WHERE id = $1 FOR UPDATE`,
-      [id],
+       FROM orders WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [id, workspaceId],
     )
     if (!previous.rows[0]) {
       await client.query('ROLLBACK')
@@ -170,8 +173,9 @@ export async function updateOrder(id: string, input: OrderInput): Promise<OrderR
         order_date = $5::date,
         delivery_deadline = $6::date,
         additional_notes = $7,
+        sample_image = CASE WHEN $8::boolean THEN $9 ELSE sample_image END,
         updated_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1 AND workspace_id = $10`,
       [
         id,
         input.customerName,
@@ -180,6 +184,9 @@ export async function updateOrder(id: string, input: OrderInput): Promise<OrderR
         input.orderDate,
         input.deliveryDeadline,
         input.additionalNotes,
+        input.sampleImage !== undefined,
+        input.sampleImage ?? null,
+        workspaceId,
       ],
     )
 
@@ -189,7 +196,7 @@ export async function updateOrder(id: string, input: OrderInput): Promise<OrderR
       }
     }
 
-    const order = await getOrder(id, client)
+    const order = await getOrder(id, workspaceId, client)
     await client.query('COMMIT')
     return order
   } catch (error) {
@@ -200,15 +207,23 @@ export async function updateOrder(id: string, input: OrderInput): Promise<OrderR
   }
 }
 
-export async function rescheduleOrder(id: string, deliveryDeadline: string): Promise<OrderRecord | null> {
+export async function deleteOrder(id: string, workspaceId: string): Promise<boolean> {
+  const result = await getDatabase().query(
+    'DELETE FROM orders WHERE id = $1 AND workspace_id = $2 RETURNING id',
+    [id, workspaceId],
+  )
+  return result.rowCount === 1
+}
+
+export async function rescheduleOrder(id: string, workspaceId: string, deliveryDeadline: string): Promise<OrderRecord | null> {
   const pool = getDatabase()
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const current = await client.query(
       `SELECT status, order_date::text AS order_date, delivery_deadline::text AS delivery_deadline
-       FROM orders WHERE id = $1 FOR UPDATE`,
-      [id],
+       FROM orders WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [id, workspaceId],
     )
     if (!current.rowCount) {
       await client.query('ROLLBACK')
@@ -223,12 +238,12 @@ export async function rescheduleOrder(id: string, deliveryDeadline: string): Pro
     if (String(current.rows[0].delivery_deadline).slice(0, 10) !== deliveryDeadline) {
       await client.query(
         `UPDATE orders SET delivery_deadline = $2::date, updated_at = NOW()
-         WHERE id = $1`,
-        [id, deliveryDeadline],
+         WHERE id = $1 AND workspace_id = $3`,
+        [id, deliveryDeadline, workspaceId],
       )
       await scheduleReminder(client, id, 'rescheduled')
     }
-    const order = await getOrder(id, client)
+    const order = await getOrder(id, workspaceId, client)
     await client.query('COMMIT')
     return order
   } catch (error) {
@@ -239,18 +254,21 @@ export async function rescheduleOrder(id: string, deliveryDeadline: string): Pro
   }
 }
 
-export async function completeOrder(id: string): Promise<OrderRecord | null> {
+export async function completeOrder(id: string, workspaceId: string): Promise<OrderRecord | null> {
   const pool = getDatabase()
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const updated = await client.query(
       `UPDATE orders SET status = 'completed', updated_at = NOW()
-       WHERE id = $1 AND status = 'pending' RETURNING id`,
-      [id],
+       WHERE id = $1 AND workspace_id = $2 AND status = 'pending' RETURNING id`,
+      [id, workspaceId],
     )
     if (!updated.rowCount) {
-      const exists = await client.query('SELECT id FROM orders WHERE id = $1', [id])
+      const exists = await client.query(
+        'SELECT id FROM orders WHERE id = $1 AND workspace_id = $2',
+        [id, workspaceId],
+      )
       await client.query('ROLLBACK')
       if (!exists.rowCount) return null
       throw new Error('This order is already completed.')
@@ -258,11 +276,13 @@ export async function completeOrder(id: string): Promise<OrderRecord | null> {
     const reminder = await client.query(
       `UPDATE order_reminders SET status = 'completed', dispatch_lease_until = NULL,
          updated_at = NOW()
-       WHERE order_id = $1 RETURNING id`,
-      [id],
+       WHERE order_id = $1 AND EXISTS (
+         SELECT 1 FROM orders WHERE id = $1 AND workspace_id = $2
+       ) RETURNING id`,
+      [id, workspaceId],
     )
     if (reminder.rows[0]) await writeHistory(client, id, reminder.rows[0].id, 'completed')
-    const order = await getOrder(id, client)
+    const order = await getOrder(id, workspaceId, client)
     await client.query('COMMIT')
     return order
   } catch (error) {
@@ -273,7 +293,7 @@ export async function completeOrder(id: string): Promise<OrderRecord | null> {
   }
 }
 
-export async function dismissReminder(id: string): Promise<boolean> {
+export async function dismissReminder(id: string, workspaceId: string): Promise<boolean> {
   const pool = getDatabase()
   const client = await pool.connect()
   try {
@@ -282,8 +302,9 @@ export async function dismissReminder(id: string): Promise<boolean> {
       `UPDATE order_reminders SET status = 'dismissed', dismissed_at = NOW(),
          dispatch_lease_until = NULL, updated_at = NOW()
        WHERE order_id = $1 AND status IN ('scheduled', 'dispatching', 'delivered')
+         AND EXISTS (SELECT 1 FROM orders WHERE id = $1 AND workspace_id = $2)
        RETURNING id`,
-      [id],
+      [id, workspaceId],
     )
     if (result.rows[0]) await writeHistory(client, id, result.rows[0].id, 'dismissed')
     await client.query('COMMIT')
@@ -296,7 +317,7 @@ export async function dismissReminder(id: string): Promise<boolean> {
   }
 }
 
-export async function getDueReminders() {
+export async function getDueReminders(workspaceId: string) {
   const result = await getDatabase().query(
     `SELECT r.id AS "reminderId", o.id AS "orderId", o.customer_name AS "customerName",
        o.jewellery_name AS "jewelleryName", o.advance_amount AS "advanceAmount",
@@ -306,8 +327,9 @@ export async function getDueReminders() {
      FROM order_reminders r
      JOIN orders o ON o.id = r.order_id
      WHERE r.status IN ('scheduled', 'dispatching', 'delivered')
-       AND r.reminder_at <= NOW() AND o.status = 'pending'
+       AND r.reminder_at <= NOW() AND o.status = 'pending' AND o.workspace_id = $1
      ORDER BY r.reminder_at ASC`,
+    [workspaceId],
   )
   return result.rows.map((row) => ({
     ...row,
@@ -318,11 +340,13 @@ export async function getDueReminders() {
   }))
 }
 
-export async function markPopupShown(reminderId: string) {
+export async function markPopupShown(reminderId: string, workspaceId: string) {
   await getDatabase().query(
     `INSERT INTO notification_history (order_id, reminder_id, event_type)
-     SELECT order_id, id, 'popup_shown' FROM order_reminders
-     WHERE id = $1 AND status IN ('scheduled', 'dispatching', 'delivered')`,
-    [reminderId],
+     SELECT r.order_id, r.id, 'popup_shown' FROM order_reminders r
+     JOIN orders o ON o.id = r.order_id
+     WHERE r.id = $1 AND r.status IN ('scheduled', 'dispatching', 'delivered')
+       AND o.workspace_id = $2`,
+    [reminderId, workspaceId],
   )
 }

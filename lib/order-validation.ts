@@ -5,11 +5,24 @@ export interface OrderInput {
   orderDate: string
   deliveryDeadline: string
   additionalNotes: string
+  sampleImage?: string | null
 }
 
 export interface ValidationResult {
   value?: OrderInput
   error?: string
+}
+
+const MAX_SAMPLE_IMAGE_BYTES = 1_000_000
+
+function isSampleImage(value: unknown): value is string | null {
+  if (value === undefined || value === null || value === '') return true
+  if (typeof value !== 'string') return false
+  const match = /^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/]*={0,2})$/.exec(value)
+  if (!match || match[1].length % 4 !== 0) return false
+  const padding = match[1].endsWith('==') ? 2 : match[1].endsWith('=') ? 1 : 0
+  const bytes = (match[1].length / 4) * 3 - padding
+  return bytes > 0 && bytes <= MAX_SAMPLE_IMAGE_BYTES
 }
 
 function isIsoDate(value: unknown): value is string {
@@ -30,6 +43,7 @@ export function validateOrderInput(input: unknown): ValidationResult {
   const customerName = typeof fields.customerName === 'string' ? fields.customerName.trim() : ''
   const jewelleryName = typeof fields.jewelleryName === 'string' ? fields.jewelleryName.trim() : ''
   const additionalNotes = typeof fields.additionalNotes === 'string' ? fields.additionalNotes.trim() : ''
+  const sampleImage = fields.sampleImage
   const amountProvided =
     (typeof fields.advanceAmount === 'string' && fields.advanceAmount.trim() !== '') ||
     typeof fields.advanceAmount === 'number'
@@ -59,6 +73,9 @@ export function validateOrderInput(input: unknown): ValidationResult {
   if (additionalNotes.length > 5000) {
     return { error: 'Additional notes must be 5,000 characters or fewer.' }
   }
+  if (!isSampleImage(sampleImage)) {
+    return { error: 'Sample image must be a JPEG, PNG, or WebP image no larger than 1 MB.' }
+  }
 
   return {
     value: {
@@ -68,6 +85,7 @@ export function validateOrderInput(input: unknown): ValidationResult {
       orderDate: fields.orderDate,
       deliveryDeadline: fields.deliveryDeadline,
       additionalNotes,
+      ...(sampleImage !== undefined ? { sampleImage: sampleImage || null } : {}),
     },
   }
 }

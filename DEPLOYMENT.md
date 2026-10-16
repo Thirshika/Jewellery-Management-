@@ -6,21 +6,27 @@ The diary uses the Next.js server APIs with managed PostgreSQL. Order records, u
 
 The migration creates:
 
-- `orders` for customer/jewellery details, advance, dates, notes, and completion state.
+- `orders` for customer/jewellery details, advance, dates, notes, and completion state, scoped to a workspace.
 - `order_reminders` with a unique `order_id`, IST reminder timestamp, delivery state, lease/retry fields, and schedule version.
 - `notification_history` for scheduling, rescheduling, push attempts, popup display, dismissal, and completion events.
 - `push_subscriptions` for opted-in browsers.
+- `saved_bills` for immutable bill snapshots linked to an order when available and scoped to a workspace.
+- `user_accounts` for email or phone-based sign-in, with salted password hashes.
+- `workspaces` for isolated business data owned by one account.
 
-By default, the dashboard and order APIs open without a sign-in. **Anyone who can access the deployed site can view, add, change, and complete orders.** Keep the deployment private or set `APP_AUTH_ENABLED=true` to require the single-admin password. When authentication is enabled, the JSON endpoints below require a signed session except for login/logout and the separately protected cron endpoint.
+The dashboard and business APIs require an account. Anyone can create an account using the sign-up page; each new account receives its own workspace, and its orders, reminders, bills, catalogue, and notification subscriptions are isolated from other accounts. Existing data is retained in a legacy workspace and assigned to the earliest existing account, or to the first account created after the workspace migration. Passwords are stored as salted scrypt hashes. Keep `APP_SESSION_SECRET` private; it signs 12-hour HTTP-only sessions.
 
 The JSON endpoints are:
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/auth/login` | Sign in when `APP_AUTH_ENABLED=true` |
+| `POST` | `/api/auth/login` | Sign in with email and password |
+| `POST` | `/api/auth/signup` | Create an account and sign in |
 | `GET` | `/api/auth/session` | Check the signed session |
 | `POST` | `/api/auth/logout` | Clear the session |
 | `GET`, `POST` | `/api/orders` | List/search saved orders; create an order |
+| `GET`, `POST` | `/api/bills` | List saved bills; save a bill |
+| `PATCH` | `/api/bills/:id` | Update an existing saved bill |
 | `GET`, `PATCH` | `/api/orders/:id` | View or edit an order |
 | `POST` | `/api/orders/:id/complete` | Mark an order completed |
 | `PATCH` | `/api/orders/:id/reschedule` | Change the deadline and reschedule its reminder |
@@ -28,9 +34,12 @@ The JSON endpoints are:
 | `GET`, `POST` | `/api/reminders/due` | Poll due reminders; record an in-app popup |
 | `GET` | `/api/push/public-key` | Get the public VAPID key |
 | `POST`, `DELETE` | `/api/push/subscribe` | Add or remove a browser push subscription |
+| `GET` | `/api/metals/rates` | Get indicative INR-per-gram gold and silver spot rates; requires sign-in |
 | `GET` | `/api/cron/reminders` | Claim due reminders and deliver push notifications; requires `CRON_SECRET` |
 
 The database calculates `overdue` from the current `Asia/Kolkata` date instead of storing a stale overdue flag. Input validation is applied on the server as well as in the form.
+
+The dashboard and bill pages show indicative 24K gold, derived 22K gold, and 999 silver prices per gram. Rates come from the public [Gold API](https://gold-api.com/docs), using its XAU/INR and XAG/INR spot prices converted from troy ounces; requests are cached for 15 minutes and open pages refresh at that interval. The rates panel also links to a Google search for Tamil Nadu gold and silver rates. Search results may show different sources and locations and are not guaranteed to be verified quotations. The displayed spot prices are not Tamil Nadu jeweller rates; prices exclude local taxes, GST, and making charges. Verify the shop's actual rate before preparing or agreeing to a bill.
 
 The current application stores customer and jewellery names directly on each order. It does not define or query separate products, customers, payments, or inventory tables, so migrations do not add unrelated entities or alter those names into foreign-key relationships.
 
@@ -58,6 +67,14 @@ The migration runner loads `.env.production.local` before `.env.local` when `DAT
 
 Migration `001_digital_diary.sql` creates or repairs the four tables used by the current application: `orders`, `order_reminders`, `notification_history`, and `push_subscriptions`. Migration `002_ensure_digital_diary_schema.sql` is a versioned, idempotent safety migration that ensures those tables, their keys and relationships, defaults, checks, and query indexes exist even if an earlier deployment recorded version `001` but the tables are absent. The order table stores customer and jewellery names as text; there are no separate product, customer, payment, or inventory models in the current application.
 
+Migration `003_order_sample_image.sql` adds a nullable `sample_image` column to `orders` for the customer's reference jewellery photo. Apply it with the same explicit migration command before deploying the photo-upload UI. The form resizes supported JPEG, PNG, or WebP uploads and limits the stored image to 1 MB; order-list responses omit image data, and the photo is returned only when an individual order is opened.
+
+Migration `004_saved_bills.sql` creates the `saved_bills` table. In Digital Diary, **Save bill** stores a bill snapshot in PostgreSQL; saved bills appear in Reports and can be reopened and updated. Apply all pending migrations with `npm run db:migrate` before using bill saving in a deployment.
+
+Migration `005_user_accounts.sql` creates the account table and unique email index. Migration `006_account_phone_login.sql` adds optional phone-number identifiers and a unique phone index while preserving existing email accounts. Run `npm run db:migrate` before deploying these authentication features; schema changes are never run automatically during build or app startup.
+
+Migration `007_isolated_workspaces.sql` creates per-account workspaces, assigns preserved existing orders and bills to the legacy workspace, and adds workspace scope to orders, bills, and push subscriptions. Apply it before deploying the per-account workspace changes.
+
 The migrations preserve existing records: they do not drop tables or delete rows. If an existing table has incompatible data or a conflicting schema, the migration fails and rolls back instead of guessing how to change business data. Review and resolve any reported conflict before retrying.
 
 ## 2. Configure Vercel environment variables
@@ -67,9 +84,7 @@ Set these variables for the Production deployment (and Preview only if preview d
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Pooled PostgreSQL connection string |
-| `APP_AUTH_ENABLED` | Optional. Set to `true` to require sign-in; leave unset or `false` to open the app without a login |
-| `APP_PASSWORD` | Required only when authentication is enabled; use at least 12 characters |
-| `APP_SESSION_SECRET` | Required only when authentication is enabled; random signing secret, at least 32 characters |
+| `APP_SESSION_SECRET` | Required. Random session-signing secret, at least 32 characters |
 | `CRON_SECRET` | A different random secret, at least 32 characters |
 | `VAPID_PUBLIC_KEY` | Public Web Push key |
 | `VAPID_PRIVATE_KEY` | Private Web Push key; do not expose it to the browser |
@@ -87,7 +102,7 @@ Generate the Web Push key pair with:
 npx web-push generate-vapid-keys
 ```
 
-Keep the private key and all passwords in Vercel's encrypted environment-variable settings; never commit real values or put them in `NEXT_PUBLIC_*` variables.
+Keep the private key and session secret in Vercel's encrypted environment-variable settings; never commit real values or put them in `NEXT_PUBLIC_*` variables. Users set their own account passwords through sign-up; account passwords are not environment variables.
 
 ## 3. Deploy and enable reminders
 
@@ -101,15 +116,21 @@ The job authenticates using the `CRON_SECRET` environment variable and claims du
 
 Open the website and choose **Enable push** in the Digital Diary. The browser asks for notification permission and stores a subscription on the server. Push requires HTTPS (localhost is allowed for development), a supported browser, permission from the user, and the VAPID variables above. If the website is open, due reminders are also polled and shown in the in-app popup.
 
-## Optional password protection
+## Account sign-in and sign-up
 
-The app opens directly without a login by default, as requested. This also leaves all order data and order-changing APIs publicly accessible on a public deployment. To enable the admin login, set `APP_AUTH_ENABLED=true` and configure a strong `APP_PASSWORD` plus an `APP_SESSION_SECRET` of at least 32 characters, then redeploy. To remove sign-in, unset `APP_AUTH_ENABLED` (or set it to `false`) and redeploy.
+Set `APP_SESSION_SECRET` to a newly generated random value of at least 32 characters in the local `.env.local` file and Vercel Production settings. For local development, copy `.env.example` to `.env.local` and generate the value in PowerShell:
+
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+```
+
+Run pending migrations with `npm run db:migrate`, including `008_account_display_name.sql`, then deploy. Visitors sign up with their name, an email address or phone number, and a password of at least 12 characters. The signup name is shown in the dashboard greeting. Sign in using the same identifier; Indian 10-digit phone numbers are normalized to `+91`, and international numbers may be entered with a `+` country code. Each account receives a separate workspace. The earliest existing account retains the existing workspace data; if no account exists yet, the first new account claims the preserved legacy workspace. Phone sign-in uses the account password; SMS verification and password reset are not implemented.
 
 For sound, click **Enable sound** once in each browser tab/session. Browsers block audio that starts without a user gesture; operating-system notification sounds are controlled by the browser and device and cannot be guaranteed by the website.
 
 ## Local development
 
-Copy `.env.example` to `.env.local`, set `DATABASE_URL`, `CRON_SECRET`, and any optional push keys, run `npm run db:migrate`, then use:
+Copy `.env.example` to `.env.local`, set `DATABASE_URL`, `APP_SESSION_SECRET`, `CRON_SECRET`, and any optional push keys, run `npm run db:migrate`, then use:
 
 ```powershell
 corepack pnpm install --frozen-lockfile

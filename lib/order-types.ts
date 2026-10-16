@@ -8,6 +8,7 @@ export interface OrderRecord {
   orderDate: string
   deliveryDeadline: string
   additionalNotes: string
+  sampleImage: string | null
   status: OrderStatus
   createdAt: string
   updatedAt: string

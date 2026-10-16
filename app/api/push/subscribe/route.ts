@@ -1,4 +1,4 @@
-import { errorResponse, requireAdmin } from '@/lib/server/http'
+import { errorResponse, requireWorkspace } from '@/lib/server/http'
 import { getDatabase } from '@/lib/server/database'
 
 export const runtime = 'nodejs'
@@ -26,8 +26,8 @@ function isValidSubscription(value: unknown): value is {
 }
 
 export async function POST(request: Request) {
-  const unauthorized = requireAdmin(request)
-  if (unauthorized) return unauthorized
+  const workspaceId = requireWorkspace(request)
+  if (typeof workspaceId !== 'string') return workspaceId
 
   let subscription: unknown
   try {
@@ -41,12 +41,12 @@ export async function POST(request: Request) {
 
   try {
     await getDatabase().query(
-      `INSERT INTO push_subscriptions (endpoint, subscription)
-       VALUES ($1, $2::jsonb)
-       ON CONFLICT (endpoint) DO UPDATE SET
+      `INSERT INTO push_subscriptions (workspace_id, endpoint, subscription)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (workspace_id, endpoint) DO UPDATE SET
          subscription = EXCLUDED.subscription,
          last_seen_at = NOW()`,
-      [subscription.endpoint, JSON.stringify(subscription)],
+      [workspaceId, subscription.endpoint, JSON.stringify(subscription)],
     )
     return Response.json({ subscribed: true }, { status: 201 })
   } catch (error) {
@@ -56,8 +56,8 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const unauthorized = requireAdmin(request)
-  if (unauthorized) return unauthorized
+  const workspaceId = requireWorkspace(request)
+  if (typeof workspaceId !== 'string') return workspaceId
 
   let body: unknown
   try {
@@ -74,7 +74,10 @@ export async function DELETE(request: Request) {
   }
 
   try {
-    await getDatabase().query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint])
+    await getDatabase().query(
+      'DELETE FROM push_subscriptions WHERE endpoint = $1 AND workspace_id = $2',
+      [endpoint, workspaceId],
+    )
     return Response.json({ subscribed: false })
   } catch (error) {
     console.error('Could not remove push subscription:', error)

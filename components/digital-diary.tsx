@@ -6,6 +6,7 @@ import {
   BellOff,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Eye,
   FileText,
@@ -13,11 +14,13 @@ import {
   Pencil,
   Plus,
   Search,
+  Trash2,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react'
 import type { OrderRecord, OrderStatus } from '@/lib/order-types'
+import { useLanguage } from '@/lib/language'
 
 type DiaryFilter = 'pending' | 'completed' | 'overdue' | 'all'
 type OrderFormValues = {
@@ -27,6 +30,7 @@ type OrderFormValues = {
   orderDate: string
   deliveryDeadline: string
   additionalNotes: string
+  sampleImage: string | null
 }
 type DueReminder = {
   reminderId: string
@@ -40,6 +44,26 @@ type DueReminder = {
 }
 type PushSettings = { enabled: boolean; publicKey: string | null }
 
+const jewelleryOptions = [
+  'Necklace',
+  'Gold chain',
+  'Haaram',
+  'Choker',
+  'Mangalsutra',
+  'Pendant',
+  'Earrings',
+  'Jhumka',
+  'Stud earrings',
+  'Bangles',
+  'Bracelet',
+  'Ring',
+  'Nose pin',
+  'Anklet',
+  'Waist belt',
+  'Maang tikka',
+  'Bridal set',
+] as const
+
 let reminderAudioContext: AudioContext | null = null
 
 const emptyForm = (): OrderFormValues => ({
@@ -49,6 +73,7 @@ const emptyForm = (): OrderFormValues => ({
   orderDate: indiaToday(),
   deliveryDeadline: '',
   additionalNotes: '',
+  sampleImage: null,
 })
 
 function indiaToday() {
@@ -62,8 +87,8 @@ function indiaToday() {
   return `${part('year')}-${part('month')}-${part('day')}`
 }
 
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat('en-IN', {
+function formatDate(value: string, language: 'en' | 'ta') {
+  return new Intl.DateTimeFormat(language === 'ta' ? 'ta-IN' : 'en-IN', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
@@ -71,14 +96,14 @@ function formatDate(value: string) {
   }).format(new Date(`${value.slice(0, 10)}T00:00:00+05:30`))
 }
 
-function formatAmount(value: number) {
-  return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(value)
+function formatAmount(value: number, language: 'en' | 'ta') {
+  return new Intl.NumberFormat(language === 'ta' ? 'ta-IN' : 'en-IN', { style: 'currency', currency: 'INR' }).format(value)
 }
 
-function reminderTiming(deadline: string) {
-  if (deadline < indiaToday()) return 'PAST DEADLINE'
-  if (deadline === indiaToday()) return 'DUE TODAY'
-  return 'DUE TOMORROW'
+function reminderTiming(deadline: string, t: (text: string) => string) {
+  if (deadline < indiaToday()) return t('Past deadline')
+  if (deadline === indiaToday()) return t('Due today')
+  return t('Due tomorrow')
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -137,6 +162,7 @@ export function DigitalDiary({
   soundEnabled: boolean
   setSoundEnabled: (enabled: boolean) => void
 }) {
+  const { language, t } = useLanguage()
   const [orders, setOrders] = useState<OrderRecord[]>([])
   const [filter, setFilter] = useState<DiaryFilter>('pending')
   const [search, setSearch] = useState('')
@@ -145,8 +171,11 @@ export function DigitalDiary({
   const [dialog, setDialog] = useState<'create' | 'edit' | 'view' | 'reschedule' | null>(null)
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null)
   const [form, setForm] = useState<OrderFormValues>(emptyForm)
+  const [selectedJewelleryNames, setSelectedJewelleryNames] = useState<string[]>([])
+  const [customJewelleryName, setCustomJewelleryName] = useState('')
   const [deadline, setDeadline] = useState('')
   const [saving, setSaving] = useState(false)
+  const [deletingOrderId, setDeletingOrderId] = useState<string | null>(null)
   const [formError, setFormError] = useState('')
 
   const loadOrders = useCallback(async (silent = false) => {
@@ -159,11 +188,11 @@ export function DigitalDiary({
       setOrders(result.orders)
       setLoadError('')
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'Orders could not be loaded.')
+      setLoadError(t(error instanceof Error ? error.message : 'Orders could not be loaded.'))
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void loadOrders()
@@ -175,6 +204,8 @@ export function DigitalDiary({
     if (createRequest === 0) return
     setSelectedOrder(null)
     setForm(emptyForm())
+    setSelectedJewelleryNames([])
+    setCustomJewelleryName('')
     setFormError('')
     setDialog('create')
     onCreateHandled()
@@ -191,12 +222,12 @@ export function DigitalDiary({
         onOpenOrderHandled()
       })
       .catch((error: unknown) => {
-        if (!cancelled) notify(error instanceof Error ? error.message : 'Order could not be opened.')
+        if (!cancelled) notify(t(error instanceof Error ? error.message : 'Order could not be opened.'))
       })
     return () => {
       cancelled = true
     }
-  }, [openOrderId, notify, onOpenOrderHandled])
+  }, [openOrderId, notify, onOpenOrderHandled, t])
 
   const counts = useMemo(
     () => ({
@@ -225,29 +256,42 @@ export function DigitalDiary({
   function openNewOrder() {
     setSelectedOrder(null)
     setForm(emptyForm())
+    setSelectedJewelleryNames([])
+    setCustomJewelleryName('')
     setFormError('')
     setDialog('create')
   }
 
+  function loadJewellerySelection(value: string) {
+    const names = value.split(' · ').map((name) => name.trim()).filter(Boolean)
+    const selected = names.filter((name) => jewelleryOptions.some((option) => option === name))
+    const custom = names.filter((name) => !jewelleryOptions.some((option) => option === name)).join(' · ')
+    setSelectedJewelleryNames(selected)
+    setCustomJewelleryName(custom)
+  }
+
+  function updateJewelleryName(names: string[], customName: string) {
+    const values = [...names, customName.trim()].filter(Boolean)
+    setForm((current) => ({ ...current, jewelleryName: values.join(' · ') }))
+  }
+
   function editOrder(order: OrderRecord) {
-    setSelectedOrder(order)
-    setForm({
-      customerName: order.customerName,
-      jewelleryName: order.jewelleryName,
-      advanceAmount: String(order.advanceAmount),
-      orderDate: order.orderDate,
-      deliveryDeadline: order.deliveryDeadline,
-      additionalNotes: order.additionalNotes,
-    })
-    setFormError('')
-    setDialog('edit')
+    void requestJson<{ order: OrderRecord }>(`/api/orders/${order.id}`)
+      .then(({ order: details }) => {
+        setSelectedOrder(details)
+        setForm(orderToForm(details))
+        loadJewellerySelection(details.jewelleryName)
+        setFormError('')
+        setDialog('edit')
+      })
+      .catch((error: unknown) => notify(t(error instanceof Error ? error.message : 'Order could not be opened.')))
   }
 
   async function saveOrder(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setFormError('')
     if (form.deliveryDeadline < form.orderDate) {
-      setFormError('Delivery deadline cannot be before the order date.')
+      setFormError(t('Delivery deadline cannot be before the order date.'))
       return
     }
     setSaving(true)
@@ -263,24 +307,40 @@ export function DigitalDiary({
       setDialog(null)
       await loadOrders()
       onOrdersChanged()
-      notify(result.warning ?? (editing ? 'Order updated' : 'New order saved'))
+      notify(t(result.warning ?? (editing ? 'Order updated' : 'New order saved')))
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Order could not be saved.')
+      setFormError(t(error instanceof Error ? error.message : 'Order could not be saved.'))
     } finally {
       setSaving(false)
     }
   }
 
   async function markCompleted(order: OrderRecord) {
-    if (!window.confirm(`Mark ${order.jewelleryName} for ${order.customerName} as completed?`)) return
+    if (!window.confirm(`${t('Mark')} ${order.jewelleryName} ${t('for')} ${order.customerName} ${t('as completed?')}`)) return
     try {
       await requestJson(`/api/orders/${order.id}/complete`, { method: 'POST' })
       setDialog(null)
       await loadOrders()
       onOrdersChanged()
-      notify('Order marked as completed')
+      notify(t('Order marked as completed'))
     } catch (error) {
-      notify(error instanceof Error ? error.message : 'Order could not be completed.')
+      notify(t(error instanceof Error ? error.message : 'Order could not be completed.'))
+    }
+  }
+
+  async function deleteOrder(order: OrderRecord) {
+    if (!window.confirm(`${t('Delete order for')} ${order.customerName} (${order.jewelleryName})? ${t('This cannot be undone.')}`)) return
+    setDeletingOrderId(order.id)
+    try {
+      await requestJson(`/api/orders/${order.id}`, { method: 'DELETE' })
+      if (selectedOrder?.id === order.id) setDialog(null)
+      await loadOrders()
+      onOrdersChanged()
+      notify(t('Order deleted'))
+    } catch (error) {
+      notify(t(error instanceof Error ? error.message : 'The order could not be deleted.'))
+    } finally {
+      setDeletingOrderId(null)
     }
   }
 
@@ -288,7 +348,7 @@ export function DigitalDiary({
     event.preventDefault()
     if (!selectedOrder) return
     if (deadline < selectedOrder.orderDate) {
-      setFormError('Delivery deadline cannot be before the order date.')
+      setFormError(t('Delivery deadline cannot be before the order date.'))
       return
     }
     setSaving(true)
@@ -301,9 +361,9 @@ export function DigitalDiary({
       setDialog(null)
       await loadOrders()
       onOrdersChanged()
-      notify(result.warning ?? 'Delivery deadline updated and reminder rescheduled')
+      notify(t(result.warning ?? 'Delivery deadline updated and reminder rescheduled'))
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Deadline could not be rescheduled.')
+      setFormError(t(error instanceof Error ? error.message : 'Deadline could not be rescheduled.'))
     } finally {
       setSaving(false)
     }
@@ -317,28 +377,46 @@ export function DigitalDiary({
   }
 
   function viewOrder(order: OrderRecord) {
-    setSelectedOrder(order)
-    setDialog('view')
+    void requestJson<{ order: OrderRecord }>(`/api/orders/${order.id}`)
+      .then(({ order: details }) => {
+        setSelectedOrder(details)
+        setDialog('view')
+      })
+      .catch((error: unknown) => notify(t(error instanceof Error ? error.message : 'Order could not be opened.')))
+  }
+
+  async function chooseSampleImage(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      const sampleImage = await compressSampleImage(file)
+      setForm((current) => ({ ...current, sampleImage }))
+      setFormError('')
+    } catch (error) {
+      console.error('Could not process sample jewellery image:', error)
+      setFormError(t('Sample image could not be processed. Choose a JPEG, PNG, or WebP image.'))
+    }
   }
 
   return (
     <div className="content-wrap diary-wrap">
       <div className="page-heading">
         <div>
-          <p className="eyebrow">ORDERS · ASIA/KOLKATA</p>
-          <h1>Digital diary<span>.</span></h1>
-          <p className="subheading">Every order, note, and delivery milestone in one calm workspace.</p>
+          <p className="eyebrow">{t('Orders · Asia/Kolkata')}</p>
+          <h1>{t('Orders')}<span>.</span></h1>
+          <p className="subheading">{t('Every order, note, and delivery milestone in one calm workspace.')}</p>
         </div>
-        <button className="primary-button" onClick={openNewOrder}><Plus size={17} /> Add new order</button>
+        <button className="primary-button" onClick={openNewOrder}><Plus size={17} /> {t('Add new order')}</button>
       </div>
 
       <div className="diary-toolbar">
-        <div className="diary-filters" role="tablist" aria-label="Filter orders">
+        <div className="diary-filters" role="tablist" aria-label={t('Filter orders')}>
           {([
-            ['pending', 'Pending'],
-            ['completed', 'Completed'],
-            ['overdue', 'Overdue'],
-            ['all', 'All orders'],
+            ['pending', t('Pending')],
+            ['completed', t('Completed')],
+            ['overdue', t('Overdue')],
+            ['all', t('All orders')],
           ] as const).map(([value, label]) => (
             <button
               key={value}
@@ -356,8 +434,8 @@ export function DigitalDiary({
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search customer or jewellery"
-            aria-label="Search orders"
+            placeholder={t('Search customer or jewellery')}
+            aria-label={t('Search orders')}
           />
         </label>
       </div>
@@ -365,45 +443,52 @@ export function DigitalDiary({
       <section className="panel diary-orders-panel">
         <div className="panel-heading">
           <div>
-            <h2>{filter === 'all' ? 'All orders' : `${filter[0].toUpperCase()}${filter.slice(1)} orders`}</h2>
-            <p>{filter === 'overdue' ? 'Past-deadline orders that still need attention.' : filter === 'completed' ? 'Finished work from your workshop.' : 'Order details, advances, dates, and delivery progress.'}</p>
+            <h2>{filter === 'all' ? t('All orders') : `${t(filter)} ${t('orders')}`}</h2>
+            <p>{filter === 'overdue' ? t('Past-deadline orders that still need attention.') : filter === 'completed' ? t('Finished work from your workshop.') : t('Order details, advances, dates, and delivery progress.')}</p>
           </div>
           <button className="secondary-button diary-refresh" onClick={() => void loadOrders()} disabled={loading}>
-            {loading ? <LoaderCircle size={15} className="spin" /> : <Clock3 size={15} />} Refresh
+            {loading ? <LoaderCircle size={15} className="spin" /> : <Clock3 size={15} />} {t('Refresh')}
           </button>
         </div>
 
         {loadError ? (
-          <div className="diary-error" role="alert"><p>{loadError}</p><button className="secondary-button" onClick={() => void loadOrders()}>Try again</button></div>
+          <div className="diary-error" role="alert"><p>{loadError}</p><button className="secondary-button" onClick={() => void loadOrders()}>{t('Try again')}</button></div>
         ) : loading ? (
-          <div className="diary-loading"><LoaderCircle size={20} className="spin" /> Loading saved orders…</div>
+          <div className="diary-loading"><LoaderCircle size={20} className="spin" /> {t('Loading saved orders…')}</div>
         ) : visibleOrders.length === 0 ? (
           <div className="diary-empty">
             <div className="empty-icon"><FileText size={22} /></div>
-            <h3>{search ? 'No matching orders' : filter === 'completed' ? 'No completed orders yet' : filter === 'overdue' ? 'No overdue orders' : 'Your diary is ready'}</h3>
-            <p>{search ? 'Try a different customer or jewellery name.' : filter === 'pending' || filter === 'all' ? 'Add your first order and its delivery reminder will be scheduled automatically.' : 'Orders in this section will appear here.'}</p>
-            {(filter === 'pending' || filter === 'all') && !search && <button className="primary-button" onClick={openNewOrder}><Plus size={16} /> Add new order</button>}
+            <h3>{search ? t('No matching orders') : filter === 'completed' ? t('No completed orders yet') : filter === 'overdue' ? t('No overdue orders') : t('Your diary is ready')}</h3>
+            <p>{search ? t('Try a different customer or jewellery name.') : filter === 'pending' || filter === 'all' ? t('Add your first order and its delivery reminder will be scheduled automatically.') : t('Orders in this section will appear here.')}</p>
+            {(filter === 'pending' || filter === 'all') && !search && <button className="primary-button" onClick={openNewOrder}><Plus size={16} /> {t('Add new order')}</button>}
           </div>
         ) : (
           <div className="diary-table-scroll">
             <table className="diary-table">
-              <thead><tr><th>Customer</th><th>Jewellery</th><th>Advance received</th><th>Order date</th><th>Delivery deadline</th><th>Status</th><th><span className="visually-hidden">Order actions</span></th></tr></thead>
+              <thead><tr><th>{t('Customer')}</th><th>{t('Jewellery')}</th><th>{t('Advance received')}</th><th>{t('Order date')}</th><th>{t('Delivery deadline')}</th><th>{t('Status')}</th><th><span className="visually-hidden">{t('Order actions')}</span></th></tr></thead>
               <tbody>
                 {visibleOrders.map((order) => (
                   <tr key={order.id}>
-                    <td className="diary-customer">{order.customerName}</td>
-                    <td>{order.jewelleryName}</td>
-                    <td className="diary-amount">{formatAmount(order.advanceAmount)}</td>
-                    <td>{formatDate(order.orderDate)}</td>
-                    <td>{formatDate(order.deliveryDeadline)}</td>
-                    <td><OrderStatusBadge status={order.status} /></td>
-                    <td><div className="diary-row-actions">
-                      <button className="row-icon-button" title="View order" aria-label={`View ${order.jewelleryName}`} onClick={() => viewOrder(order)}><Eye size={15} /></button>
-                      <button className="row-icon-button" title="Edit order" aria-label={`Edit ${order.jewelleryName}`} onClick={() => editOrder(order)}><Pencil size={15} /></button>
+                    <td className="diary-customer" data-label={t('Customer')}>{order.customerName}</td>
+                    <td data-label={t('Jewellery')}>{order.jewelleryName}</td>
+                    <td className="diary-amount" data-label={t('Advance received')}>{formatAmount(order.advanceAmount, language)}</td>
+                    <td data-label={t('Order date')}>{formatDate(order.orderDate, language)}</td>
+                    <td data-label={t('Delivery deadline')}>{formatDate(order.deliveryDeadline, language)}</td>
+                    <td data-label={t('Status')}><OrderStatusBadge status={order.status} /></td>
+                    <td data-label=""><div className="diary-row-actions">
+                      <button className="row-icon-button" title={t('View order')} aria-label={`${t('View')} ${order.jewelleryName}`} onClick={() => viewOrder(order)}><Eye size={15} /></button>
+                      <button className="row-icon-button" title={t('Edit order')} aria-label={`${t('Edit')} ${order.jewelleryName}`} onClick={() => editOrder(order)}><Pencil size={15} /></button>
                       {order.status !== 'completed' && <>
-                        <button className="row-icon-button" title="Reschedule deadline" aria-label={`Reschedule ${order.jewelleryName}`} onClick={() => openReschedule(order)}><Clock3 size={15} /></button>
-                        <button className="row-icon-button row-complete-button" title="Mark as completed" aria-label={`Mark ${order.jewelleryName} as completed`} onClick={() => void markCompleted(order)}><Check size={16} /></button>
+                        <button className="row-icon-button" title={t('Reschedule deadline')} aria-label={`${t('Reschedule')} ${order.jewelleryName}`} onClick={() => openReschedule(order)}><Clock3 size={15} /></button>
+                        <button className="row-icon-button row-complete-button" title={t('Mark as completed')} aria-label={`${t('Mark')} ${order.jewelleryName} ${t('as completed')}`} onClick={() => void markCompleted(order)}><Check size={16} /></button>
                       </>}
+                      <button
+                        className="row-icon-button row-delete-button"
+                        title={t('Delete order')}
+                        aria-label={`${t('Delete order for')} ${order.customerName}`}
+                        disabled={deletingOrderId === order.id}
+                        onClick={() => void deleteOrder(order)}
+                      ><Trash2 size={14} /></button>
                     </div></td>
                   </tr>
                 ))}
@@ -420,50 +505,99 @@ export function DigitalDiary({
           <section className="order-modal" role="dialog" aria-modal="true" aria-labelledby="order-modal-title">
             <header className="order-modal-header">
               <div>
-                <p className="eyebrow">{dialog === 'create' ? 'NEW WORKSHOP ORDER' : dialog === 'view' ? 'ORDER DETAILS' : dialog === 'reschedule' ? 'DELIVERY DATE' : 'UPDATE ORDER'}</p>
-                <h2 id="order-modal-title">{dialog === 'create' ? 'Add new order' : dialog === 'view' ? 'Order details' : dialog === 'reschedule' ? 'Reschedule deadline' : 'Edit order'}</h2>
+                <p className="eyebrow">{t(dialog === 'create' ? 'NEW WORKSHOP ORDER' : dialog === 'view' ? 'ORDER DETAILS' : dialog === 'reschedule' ? 'DELIVERY DATE' : 'UPDATE ORDER')}</p>
+                <h2 id="order-modal-title">{t(dialog === 'create' ? 'Add new order' : dialog === 'view' ? 'Order details' : dialog === 'reschedule' ? 'Reschedule deadline' : 'Edit order')}</h2>
               </div>
-              <button className="close-button" onClick={() => setDialog(null)} aria-label="Close order form"><X size={19} /></button>
+              <button className="close-button" onClick={() => setDialog(null)} aria-label={t('Close order form')}><X size={19} /></button>
             </header>
             {(dialog === 'create' || dialog === 'edit') && (
               <form className="order-form" onSubmit={saveOrder}>
                 <div className="form-grid">
-                  <label className="form-field"><span>Customer name <b>*</b></span><input autoFocus maxLength={160} required value={form.customerName} onChange={(event) => setForm({ ...form, customerName: event.target.value })} placeholder="e.g. Meera Shah" /></label>
-                  <label className="form-field"><span>Jewellery name <b>*</b></span><input maxLength={160} required value={form.jewelleryName} onChange={(event) => setForm({ ...form, jewelleryName: event.target.value })} placeholder="e.g. Bridal necklace" /></label>
-                  <label className="form-field"><span>Advance amount received (₹) <b>*</b></span><input type="number" min="0" max="9999999999.99" step="0.01" required value={form.advanceAmount} onChange={(event) => setForm({ ...form, advanceAmount: event.target.value })} /></label>
-                  <label className="form-field"><span>Order date <b>*</b></span><input type="date" required value={form.orderDate} onChange={(event) => setForm({ ...form, orderDate: event.target.value })} /></label>
-                  <label className="form-field form-field-wide"><span>Delivery deadline <b>*</b></span><input type="date" required min={form.orderDate} value={form.deliveryDeadline} onChange={(event) => setForm({ ...form, deliveryDeadline: event.target.value })} /></label>
-                  <label className="form-field form-field-wide"><span>Additional notes</span><textarea rows={3} maxLength={5000} value={form.additionalNotes} onChange={(event) => setForm({ ...form, additionalNotes: event.target.value })} placeholder="Design preferences, measurements, or other workshop notes" /></label>
+                  <label className="form-field"><span>{t('Customer name')} <b>*</b></span><input autoFocus maxLength={160} required value={form.customerName} onChange={(event) => setForm({ ...form, customerName: event.target.value })} placeholder={t('e.g. Meera Shah')} /></label>
+                  <div className="form-field form-field-wide" role="group" aria-label={t('Jewellery name')}>
+                    <span>{t('Jewellery name')} <b>*</b></span>
+                    <details className="jewellery-picker">
+                      <summary>
+                        <span>{selectedJewelleryNames.length ? selectedJewelleryNames.map((name) => t(name)).join(', ') : t('Choose jewellery types')}</span>
+                        <ChevronDown size={16} aria-hidden="true" />
+                      </summary>
+                      <div className="jewellery-options">
+                        {jewelleryOptions.map((name) => (
+                          <label className="jewellery-option" key={name}>
+                            <input
+                              type="checkbox"
+                              checked={selectedJewelleryNames.includes(name)}
+                              onChange={(event) => {
+                                const next = event.target.checked
+                                  ? [...selectedJewelleryNames, name]
+                                  : selectedJewelleryNames.filter((selected) => selected !== name)
+                                setSelectedJewelleryNames(next)
+                                updateJewelleryName(next, customJewelleryName)
+                              }}
+                            />
+                            <span>{t(name)}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </details>
+                    <label className="form-field custom-jewellery-field">
+                      <span>{t('Other jewellery name')}</span>
+                      <input
+                        maxLength={160}
+                        value={customJewelleryName}
+                        onChange={(event) => {
+                          setCustomJewelleryName(event.target.value)
+                          updateJewelleryName(selectedJewelleryNames, event.target.value)
+                        }}
+                        placeholder={t('Add another jewellery name')}
+                      />
+                    </label>
+                    <span className="form-hint">{t('Select all jewellery items included in this order.')}</span>
+                  </div>
+                  <label className="form-field"><span>{t('Advance amount received (₹)')} <b>*</b></span><input type="number" min="0" max="9999999999.99" step="0.01" required value={form.advanceAmount} onChange={(event) => setForm({ ...form, advanceAmount: event.target.value })} /></label>
+                  <label className="form-field"><span>{t('Order date')} <b>*</b></span><input type="date" required value={form.orderDate} onChange={(event) => setForm({ ...form, orderDate: event.target.value })} /></label>
+                  <label className="form-field form-field-wide"><span>{t('Delivery deadline')} <b>*</b></span><input type="date" required min={form.orderDate} value={form.deliveryDeadline} onChange={(event) => setForm({ ...form, deliveryDeadline: event.target.value })} /></label>
+                  <label className="form-field form-field-wide"><span>{t('Additional notes')}</span><textarea rows={3} maxLength={5000} value={form.additionalNotes} onChange={(event) => setForm({ ...form, additionalNotes: event.target.value })} placeholder={t('Design preferences, measurements, or other workshop notes')} /></label>
+                  <div className="form-field form-field-wide">
+                    <span>{t('Customer sample jewellery image')}</span>
+                    <label className="sample-image-upload">
+                      <Plus size={16} /> {t(form.sampleImage ? 'Replace sample image' : 'Upload sample image')}
+                      <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void chooseSampleImage(event)} />
+                    </label>
+                    <p className="form-hint">{t('Attach a photo of the jewellery the customer provided. Images are resized and limited to 1 MB.')}</p>
+                    {form.sampleImage && <div className="sample-image-preview"><img src={form.sampleImage} alt={t('Customer sample jewellery')} /><button type="button" className="secondary-button" onClick={() => setForm((current) => ({ ...current, sampleImage: null }))}><Trash2 size={14} /> {t('Remove image')}</button></div>}
+                  </div>
                 </div>
                 {formError && <p className="form-error" role="alert">{formError}</p>}
-                <p className="form-hint">A reminder is scheduled for 9:00 AM IST, one day before delivery.</p>
-                <footer className="order-modal-actions"><button type="button" className="secondary-button" onClick={() => setDialog(null)}>Cancel</button><button type="submit" className="primary-button" disabled={saving}>{saving ? 'Saving…' : dialog === 'create' ? 'Save order' : 'Save changes'}</button></footer>
+                <p className="form-hint">{t('A reminder is scheduled for 9:00 AM IST, one day before delivery.')}</p>
+                <footer className="order-modal-actions"><button type="button" className="secondary-button" onClick={() => setDialog(null)}>{t('Cancel')}</button><button type="submit" className="primary-button" disabled={saving}>{saving ? t('Saving…') : t(dialog === 'create' ? 'Save order' : 'Save changes')}</button></footer>
               </form>
             )}
             {dialog === 'view' && selectedOrder && (
               <div className="order-details">
                 <div className="details-grid">
-                  <Detail label="Customer" value={selectedOrder.customerName} />
-                  <Detail label="Jewellery" value={selectedOrder.jewelleryName} />
-                  <Detail label="Advance received" value={formatAmount(selectedOrder.advanceAmount)} />
-                  <Detail label="Order date" value={formatDate(selectedOrder.orderDate)} />
-                  <Detail label="Delivery deadline" value={formatDate(selectedOrder.deliveryDeadline)} />
-                  <Detail label="Status" value={<OrderStatusBadge status={selectedOrder.status} />} />
+                  <Detail label={t('Customer')} value={selectedOrder.customerName} />
+                  <Detail label={t('Jewellery')} value={selectedOrder.jewelleryName} />
+                  <Detail label={t('Advance received')} value={formatAmount(selectedOrder.advanceAmount, language)} />
+                  <Detail label={t('Order date')} value={formatDate(selectedOrder.orderDate, language)} />
+                  <Detail label={t('Delivery deadline')} value={formatDate(selectedOrder.deliveryDeadline, language)} />
+                  <Detail label={t('Status')} value={<OrderStatusBadge status={selectedOrder.status} />} />
                 </div>
-                <div className="details-notes"><span>Additional notes</span><p>{selectedOrder.additionalNotes || 'No additional notes.'}</p></div>
+                <div className="details-notes"><span>{t('Additional notes')}</span><p>{selectedOrder.additionalNotes || t('No additional notes.')}</p></div>
+                {selectedOrder.sampleImage && <div className="order-sample-image"><span>{t('Customer sample jewellery')}</span><img src={selectedOrder.sampleImage} alt={t('Customer sample jewellery')} /></div>}
                 <footer className="order-modal-actions">
-                  {selectedOrder.status !== 'completed' && <button className="secondary-button" onClick={() => openReschedule(selectedOrder)}><Clock3 size={15} /> Reschedule</button>}
-                  <button className="secondary-button" onClick={() => editOrder(selectedOrder)}><Pencil size={15} /> Edit</button>
-                  {selectedOrder.status !== 'completed' && <button className="primary-button" onClick={() => void markCompleted(selectedOrder)}><Check size={15} /> Mark completed</button>}
+                  {selectedOrder.status !== 'completed' && <button className="secondary-button" onClick={() => openReschedule(selectedOrder)}><Clock3 size={15} /> {t('Reschedule')}</button>}
+                  <button className="secondary-button" onClick={() => editOrder(selectedOrder)}><Pencil size={15} /> {t('Edit')}</button>
+                  {selectedOrder.status !== 'completed' && <button className="primary-button" onClick={() => void markCompleted(selectedOrder)}><Check size={15} /> {t('Mark completed')}</button>}
                 </footer>
               </div>
             )}
             {dialog === 'reschedule' && selectedOrder && (
               <form className="order-form" onSubmit={saveDeadline}>
-                <p className="reschedule-copy">Change the delivery deadline for <strong>{selectedOrder.jewelleryName}</strong>. Its existing reminder will be updated to match.</p>
-                <label className="form-field"><span>New delivery deadline <b>*</b></span><input type="date" required min={selectedOrder.orderDate} value={deadline} onChange={(event) => setDeadline(event.target.value)} /></label>
+                <p className="reschedule-copy">{t('Change the delivery deadline for')} <strong>{selectedOrder.jewelleryName}</strong>. {t('Its existing reminder will be updated to match.')}</p>
+                <label className="form-field"><span>{t('New delivery deadline')} <b>*</b></span><input type="date" required min={selectedOrder.orderDate} value={deadline} onChange={(event) => setDeadline(event.target.value)} /></label>
                 {formError && <p className="form-error" role="alert">{formError}</p>}
-                <footer className="order-modal-actions"><button type="button" className="secondary-button" onClick={() => setDialog(null)}>Cancel</button><button type="submit" className="primary-button" disabled={saving}>{saving ? 'Updating…' : 'Update deadline'}</button></footer>
+                <footer className="order-modal-actions"><button type="button" className="secondary-button" onClick={() => setDialog(null)}>{t('Cancel')}</button><button type="submit" className="primary-button" disabled={saving}>{saving ? t('Updating…') : t('Update deadline')}</button></footer>
               </form>
             )}
           </section>
@@ -473,12 +607,62 @@ export function DigitalDiary({
   )
 }
 
+function orderToForm(order: OrderRecord): OrderFormValues {
+  return {
+    customerName: order.customerName,
+    jewelleryName: order.jewelleryName,
+    advanceAmount: String(order.advanceAmount),
+    orderDate: order.orderDate,
+    deliveryDeadline: order.deliveryDeadline,
+    additionalNotes: order.additionalNotes,
+    sampleImage: order.sampleImage,
+  }
+}
+
+function compressSampleImage(file: File): Promise<string> {
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    return Promise.reject(new Error('Unsupported sample image format.'))
+  }
+
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    const objectUrl = URL.createObjectURL(file)
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl)
+      const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale))
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale))
+      const context = canvas.getContext('2d')
+      if (!context) {
+        reject(new Error('Image resizing is unavailable.'))
+        return
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height)
+      for (const quality of [0.82, 0.72, 0.62, 0.52]) {
+        const dataUrl = canvas.toDataURL('image/jpeg', quality)
+        if (Math.ceil((dataUrl.length - dataUrl.indexOf(',') - 1) * 3 / 4) <= 1_000_000) {
+          resolve(dataUrl)
+          return
+        }
+      }
+      reject(new Error('Sample image is too large to compress.'))
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('Image file could not be read.'))
+    }
+    image.src = objectUrl
+  })
+}
+
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return <div className="detail-item"><span>{label}</span><strong>{value}</strong></div>
 }
 
 function OrderStatusBadge({ status }: { status: OrderStatus }) {
-  return <span className={`diary-status diary-status-${status}`}><i />{status}</span>
+  const { t } = useLanguage()
+  return <span className={`diary-status diary-status-${status}`}><i />{t(status)}</span>
 }
 
 export function ReminderCenter({
@@ -494,6 +678,7 @@ export function ReminderCenter({
   soundEnabled: boolean
   onEnableSound: () => void
 }) {
+  const { language, t } = useLanguage()
   const [reminders, setReminders] = useState<DueReminder[]>([])
   const [busy, setBusy] = useState(false)
   const seen = useRef(new Set<string>())
@@ -549,7 +734,7 @@ export function ReminderCenter({
       await requestJson(`/api/orders/${activeReminder.orderId}/reminder/dismiss`, { method: 'POST' })
       setReminders((current) => current.filter((item) => item.reminderId !== activeReminder.reminderId))
     } catch (error) {
-      notify(error instanceof Error ? error.message : 'Reminder could not be dismissed.')
+      notify(t(error instanceof Error ? error.message : 'Reminder could not be dismissed.'))
     } finally {
       setBusy(false)
     }
@@ -561,9 +746,9 @@ export function ReminderCenter({
       await requestJson(`/api/orders/${activeReminder.orderId}/complete`, { method: 'POST' })
       setReminders((current) => current.filter((item) => item.reminderId !== activeReminder.reminderId))
       onOrdersChanged()
-      notify('Order marked as completed')
+      notify(t('Order marked as completed'))
     } catch (error) {
-      notify(error instanceof Error ? error.message : 'Order could not be completed.')
+      notify(t(error instanceof Error ? error.message : 'Order could not be completed.'))
     } finally {
       setBusy(false)
     }
@@ -578,18 +763,18 @@ export function ReminderCenter({
     <div className="reminder-backdrop">
       <section className="reminder-modal" role="alertdialog" aria-modal="true" aria-labelledby="reminder-title">
         <div className="reminder-glow"><Bell size={22} /></div>
-        <p className="eyebrow">DELIVERY REMINDER · {reminderTiming(activeReminder.deliveryDeadline)}</p>
+        <p className="eyebrow">{t('Delivery reminder')} · {reminderTiming(activeReminder.deliveryDeadline, t)}</p>
         <h2 id="reminder-title">{activeReminder.customerName}</h2>
         <p className="reminder-jewellery">{activeReminder.jewelleryName}</p>
         <div className="reminder-details">
-          <span>Advance received <strong>{formatAmount(activeReminder.advanceAmount)}</strong></span>
-          <span>Delivery deadline <strong>{formatDate(activeReminder.deliveryDeadline)}</strong></span>
+          <span>{t('Advance received')} <strong>{formatAmount(activeReminder.advanceAmount, language)}</strong></span>
+          <span>{t('Delivery deadline')} <strong>{formatDate(activeReminder.deliveryDeadline, language)}</strong></span>
         </div>
-        {!soundEnabled && <button className="reminder-enable-sound" onClick={onEnableSound}><Volume2 size={14} /> Enable reminder sound</button>}
+        {!soundEnabled && <button className="reminder-enable-sound" onClick={onEnableSound}><Volume2 size={14} /> {t('Enable reminder sound')}</button>}
         <footer className="reminder-actions">
-          <button className="secondary-button" onClick={() => void dismiss()} disabled={busy}><BellOff size={15} /> Dismiss</button>
-          <button className="secondary-button" onClick={view}><Eye size={15} /> View order</button>
-          <button className="primary-button" onClick={() => void complete()} disabled={busy}><CheckCircle2 size={15} /> Mark completed</button>
+          <button className="secondary-button" onClick={() => void dismiss()} disabled={busy}><BellOff size={15} /> {t('Dismiss')}</button>
+          <button className="secondary-button" onClick={view}><Eye size={15} /> {t('View order')}</button>
+          <button className="primary-button" onClick={() => void complete()} disabled={busy}><CheckCircle2 size={15} /> {t('Mark completed')}</button>
         </footer>
       </section>
     </div>
@@ -603,6 +788,7 @@ function ReminderSoundSettings({
   enabled: boolean
   onChange: (enabled: boolean) => void
 }) {
+  const { t } = useLanguage()
   const [pushSettings, setPushSettings] = useState<PushSettings | null>(null)
   const [pushState, setPushState] = useState<'checking' | 'disabled' | 'enabled' | 'unsupported' | 'subscribed'>('checking')
   const [pushBusy, setPushBusy] = useState(false)
@@ -642,7 +828,7 @@ function ReminderSoundSettings({
       onChange(true)
       playReminderSound()
     } catch (error) {
-      setPushError(error instanceof Error ? error.message : 'Sound could not be enabled in this browser.')
+      setPushError(t(error instanceof Error ? error.message : 'Sound could not be enabled in this browser.'))
     }
   }
 
@@ -674,28 +860,28 @@ function ReminderSoundSettings({
         setPushState('subscribed')
       }
     } catch (error) {
-      setPushError(error instanceof Error ? error.message : 'Browser notifications could not be updated.')
+      setPushError(t(error instanceof Error ? error.message : 'Browser notifications could not be updated.'))
     } finally {
       setPushBusy(false)
     }
   }
 
   return (
-    <section className="notification-settings" aria-label="Reminder notification settings">
+    <section className="notification-settings" aria-label={t('Reminder notification settings')}>
       <div className="notification-setting-copy">
         <span className="notification-setting-icon"><Bell size={17} /></span>
-        <div><strong>Delivery reminders</strong><p>Scheduled for 9:00 AM IST, one day before each deadline. Click once to enable sound; browsers block automatic audio.</p></div>
+        <div><strong>{t('Delivery reminders')}</strong><p>{t('Scheduled for 9:00 AM IST, one day before each deadline. Click once to enable sound; browsers block automatic audio.')}</p></div>
       </div>
       <div className="notification-setting-actions">
-        <button className="secondary-button settings-toggle" onClick={() => void toggleSound()} title="A one-time click is required because browsers block automatic audio playback.">
-          {enabled ? <Volume2 size={15} /> : <VolumeX size={15} />}{enabled ? 'Sound on' : 'Enable sound'}
+        <button className="secondary-button settings-toggle" onClick={() => void toggleSound()} title={t('A one-time click is required because browsers block automatic audio playback.')}>
+          {enabled ? <Volume2 size={15} /> : <VolumeX size={15} />}{enabled ? t('Sound on') : t('Enable sound')}
         </button>
         <button className="secondary-button settings-toggle" onClick={() => void togglePush()} disabled={pushBusy || pushState === 'checking' || pushState === 'disabled' || pushState === 'unsupported'}>
           {pushState === 'subscribed' ? <BellOff size={15} /> : <Bell size={15} />}
-          {pushBusy ? 'Updating…' : pushState === 'checking' ? 'Checking push…' : pushState === 'subscribed' ? 'Push enabled' : pushState === 'unsupported' ? 'Push unavailable' : pushState === 'disabled' ? 'Push not configured' : 'Enable push'}
+          {pushBusy ? t('Updating…') : pushState === 'checking' ? t('Checking push…') : pushState === 'subscribed' ? t('Push enabled') : pushState === 'unsupported' ? t('Push unavailable') : pushState === 'disabled' ? t('Push not configured') : t('Enable push')}
         </button>
       </div>
-      {pushError && <p className="notification-setting-error" role="alert">{pushError}</p>}
+      {pushError && <p className="notification-setting-error" role="alert">{t(pushError)}</p>}
     </section>
   )
 }
