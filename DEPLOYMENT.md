@@ -32,11 +32,33 @@ The JSON endpoints are:
 
 The database calculates `overdue` from the current `Asia/Kolkata` date instead of storing a stale overdue flag. Input validation is applied on the server as well as in the form.
 
-## 1. Create the database
+The current application stores customer and jewellery names directly on each order. It does not define or query separate products, customers, payments, or inventory tables, so migrations do not add unrelated entities or alter those names into foreign-key relationships.
+
+## 1. Create and migrate the database
 
 1. Create a PostgreSQL database through the Vercel Marketplace (for example, Neon).
-2. Copy its **pooled** connection string into the `DATABASE_URL` environment variable. Keep the password private.
-3. In that database's SQL editor, run [`database/migrations/001_digital_diary.sql`](./database/migrations/001_digital_diary.sql) once. This creates the orders, reminders, push subscriptions, indexes, and notification history tables.
+2. Set `DATABASE_URL` to the database's **pooled** PostgreSQL connection string for the application. The application reads it from the environment; no database host or credentials are hardcoded.
+3. Before deploying, apply the migrations explicitly. The runner uses the same `pg` library as the application, serializes concurrent migration runs with a transaction-scoped PostgreSQL advisory lock, records applied files in `schema_migrations`, and runs each migration in a transaction. It never drops tables or deletes orders. Database migrations are not run by `next build` or Vercel's build step.
+
+For local development, put the local connection string in the ignored `.env.local` file and run:
+
+```powershell
+npm run db:migrate
+```
+
+To migrate the **Neon production database**, first link the Vercel project and pull its Production variables to the ignored `.env.production.local` file, then run the same migration command:
+
+```powershell
+vercel link
+vercel env pull .env.production.local --environment=production
+npm run db:migrate
+```
+
+The migration runner loads `.env.production.local` before `.env.local` when `DATABASE_URL` is not already set in the process. Confirm the Vercel Production `DATABASE_URL` is the intended Neon database before pulling variables or applying migrations. Do not add either local env file to source control.
+
+Migration `001_digital_diary.sql` creates or repairs the four tables used by the current application: `orders`, `order_reminders`, `notification_history`, and `push_subscriptions`. Migration `002_ensure_digital_diary_schema.sql` is a versioned, idempotent safety migration that ensures those tables, their keys and relationships, defaults, checks, and query indexes exist even if an earlier deployment recorded version `001` but the tables are absent. The order table stores customer and jewellery names as text; there are no separate product, customer, payment, or inventory models in the current application.
+
+The migrations preserve existing records: they do not drop tables or delete rows. If an existing table has incompatible data or a conflicting schema, the migration fails and rolls back instead of guessing how to change business data. Review and resolve any reported conflict before retrying.
 
 ## 2. Configure Vercel environment variables
 
@@ -69,7 +91,7 @@ Keep the private key and all passwords in Vercel's encrypted environment-variabl
 
 ## 3. Deploy and enable reminders
 
-Deploy the project to Vercel. [`vercel.json`](./vercel.json) schedules `GET /api/cron/reminders` daily at 03:30 UTC (09:00 Asia/Kolkata). Vercel cron expressions use UTC. Hobby cron jobs run at most once per day and can be delayed by up to 59 minutes; Pro/Enterprise support per-minute scheduling. On Hobby, reminders due after that day's run can be delayed until the next run. For faster retries and more precise delivery on Pro/Enterprise, change the schedule to `* * * * *` after confirming the plan's function limits.
+After the production migration succeeds, deploy the project to Vercel. [`vercel.json`](./vercel.json) schedules `GET /api/cron/reminders` daily at 03:30 UTC (09:00 Asia/Kolkata). Vercel cron expressions use UTC. Hobby cron jobs run at most once per day and can be delayed by up to 59 minutes; Pro/Enterprise support per-minute scheduling. On Hobby, reminders due after that day's run can be delayed until the next run. For faster retries and more precise delivery on Pro/Enterprise, change the schedule to `* * * * *` after confirming the plan's function limits.
 
 If an order is created or rescheduled after its 09:00 IST reminder time has already passed, the API also attempts an immediate backend dispatch. This reduces late notifications on Hobby, but failed push delivery still waits for the next daily run to retry.
 
@@ -87,10 +109,11 @@ For sound, click **Enable sound** once in each browser tab/session. Browsers blo
 
 ## Local development
 
-Copy `.env.example` to `.env.local`, set `DATABASE_URL`, `CRON_SECRET`, and any optional push keys, run the SQL migration, then use:
+Copy `.env.example` to `.env.local`, set `DATABASE_URL`, `CRON_SECRET`, and any optional push keys, run `npm run db:migrate`, then use:
 
 ```powershell
 corepack pnpm install --frozen-lockfile
+npm run db:migrate
 corepack pnpm dev
 ```
 
